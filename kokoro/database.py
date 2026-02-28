@@ -5,8 +5,8 @@ import sqlalchemy as sa
 from flask_sqlalchemy import SQLAlchemy
 from flask_sqlalchemy.session import Session
 from sqlalchemy import event
+from sqlalchemy.exc import UnboundExecutionError
 
-from contextlib import contextmanager
 from functools import wraps
 
 
@@ -18,15 +18,20 @@ logger = logging.getLogger(__name__)
 
 
 class RouteSQLAlchemy(SQLAlchemy):
-    def __init__(self, **kwargs: t.Any):
-        super().__init__(**kwargs)
+    def __init__(self, *args, **kwargs):
+        """
+        Initialize RouteSQLAlchemy.
+
+        See flask_sqlalchemy.SQLAlchemy.__init__ for parameters.
+        """
+        super().__init__(*args, **kwargs)
         self.session.set_bind = lambda bind: self.session().set_bind(bind)
 
 
 class RouteSession(Session):
     def __init__(self, db: SQLAlchemy, **kwargs: t.Any) -> None:
         super().__init__(db, **kwargs)
-        self.engine_bind = None
+        self.engine_bind: sa.engine.Engine | None = None
 
     def get_bind(
         self,
@@ -35,10 +40,21 @@ class RouteSession(Session):
         bind: sa.engine.Engine | sa.engine.Connection | None = None,
         **kwargs: t.Any,
     ) -> sa.engine.Engine | sa.engine.Connection:
+        """
+        Select an engine based on the ``bind_key`` of the metadata associated with
+        the model or table being queried. If no bind key is set, uses the default bind.
+        """
+
         if self.engine_bind is not None:
             return self.engine_bind
 
-        return super().get_bind(mapper, clause, bind, **kwargs)
+        try:
+            selected_bind = super().get_bind(mapper, clause, bind, **kwargs)
+        except UnboundExecutionError:
+            selected_bind = None
+
+        if selected_bind is None:
+            return self._db.engines.get("default")
 
     def set_bind(self, bind: sa.engine.Engine | sa.engine.Connection | str):
         """Override the bind to use for this session."""
@@ -98,7 +114,24 @@ db = RouteSQLAlchemy(session_options={"class_": RouteSession})
 
 
 def set_route_bind(bind_name: str):
-    """Decorator to set the read session binding"""
+    """
+    Decorator to route all database queries in a request to a specific bind.
+    
+    Sets the session's engine_bind before the route executes, and restores
+    the original bind after completion (even if an exception occurs).
+    
+    Args:
+        bind_name: Name of the bind (must exist in SQLALCHEMY_BINDS)
+    
+    Usage:
+        @app.route("/read")
+        @set_route_bind("replica")
+        def read_data():
+            return db.session.execute(text("SELECT ...")).fetchall()
+    
+    Note:
+        Decorator order matters - @set_route_bind must come AFTER @app.route
+    """
 
     def decorator(func):
         @wraps(func)
