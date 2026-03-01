@@ -1,6 +1,8 @@
 import time
 import logging
 
+import typing as t
+
 import gevent
 from flask import Flask
 from sqlalchemy import text
@@ -165,3 +167,81 @@ def debug_session():
         if session.engine_bind
         else None,
     }
+
+
+@app.route("/debug/session_identity")
+def debug_session_identity():
+    """
+    Debug endpoint to verify scoped_session returns same instance within a request.
+    
+    scoped_session maintains a registry keyed by greenlet ID. Within the same
+    greenlet (request), calling db.session() multiple times returns the SAME
+    session instance.
+    
+    Test:
+        curl -s http://localhost:8000/debug/session_identity
+    
+    Expected:
+        - is_same_session: true
+        - session_id == another_session_id
+        - session_sequence_id == another_session_sequence_id
+    """
+
+    session = db.session()
+    another_session = db.session()
+
+    return {
+        "session_id": id(session),
+        "another_session_id": id(another_session),
+        "is_same_session": session is another_session,
+        "session_sequence_id": session._unique_id,
+        "another_session_sequence_id": another_session._unique_id,
+    }
+
+
+@app.route("/inspect/session/engine/url")
+def debug_inspect_session_engine_url():
+    """
+    Debug endpoint to verify bind switching within the same session.
+    
+    Demonstrates that set_bind() changes the engine URL returned by
+    get_engine_url() while keeping the same session instance.
+    
+    Test:
+        curl -s http://localhost:8000/inspect/session/engine/url
+    
+    Expected:
+        - other_bind_url: postgresql://...other_db
+        - default_bind_url: postgresql://...postgres
+        - Same session_sequence_id for both (same session, different bind)
+    """
+
+    resp: dict[str, t.Any] = {}
+
+    session = db.session()
+    db.session.set_bind("other")
+
+    resp.update(
+        {
+            "other_bind_url": {
+                "url": db.session.get_engine_url(),
+                "session_sequnece_id": session._unique_id,
+                "session_id": id(session),
+                "db_session_id": id(db.session),
+            }
+        }
+    )
+
+    db.session.set_bind("default")
+    resp.update(
+        {
+            "default_bind_url": {
+                "url": db.session.get_engine_url(),
+                "session_sequnece_id": session._unique_id,
+                "session_id": id(session),
+                "db_session_id": id(db.session),
+            }
+        }
+    )
+
+    return resp

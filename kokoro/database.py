@@ -31,6 +31,11 @@ class RouteSQLAlchemy(SQLAlchemy):
         """
         super().__init__(*args, **kwargs)
         self.session.set_bind = lambda bind: self.session().set_bind(bind)
+        self.session.get_engine_url = (
+            lambda: self.session().get_bind().url.render_as_string(hide_password=True)
+            if self.session().get_bind()
+            else None
+        )
 
 
 class RouteSession(Session):
@@ -121,9 +126,6 @@ def inspect_session():
     return info
 
 
-db = RouteSQLAlchemy(session_options={"class_": RouteSession})
-
-
 def set_route_bind(bind_name: str):
     """
     Decorator to route all database queries in a request to a specific bind.
@@ -157,3 +159,6 @@ def set_route_bind(bind_name: str):
         return wrapper
 
     return decorator
+
+
+db = RouteSQLAlchemy(session_options={"class_": RouteSession})
