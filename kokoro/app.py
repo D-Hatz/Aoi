@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 def create_app():
     app = Flask(__name__)
-
+    # TODO: check the autoflush option.
     app.config |= {
         "SQLALCHEMY_BINDS": {
             "replica": {
@@ -177,14 +177,14 @@ def debug_session():
 def debug_session_identity():
     """
     Debug endpoint to verify scoped_session returns same instance within a request.
-    
+
     scoped_session maintains a registry keyed by greenlet ID. Within the same
     greenlet (request), calling db.session() multiple times returns the SAME
     session instance.
-    
+
     Test:
         curl -s http://localhost:8000/debug/session_identity
-    
+
     Expected:
         - is_same_session: true
         - session_id == another_session_id
@@ -207,13 +207,13 @@ def debug_session_identity():
 def debug_inspect_session_engine_url():
     """
     Debug endpoint to verify bind switching within the same session.
-    
+
     Demonstrates that set_bind() changes the engine URL returned by
     get_engine_url() while keeping the same session instance.
-    
+
     Test:
         curl -s http://localhost:8000/inspect/session/engine/url
-    
+
     Expected:
         - other_bind_url: postgresql://...other_db
         - default_bind_url: postgresql://...postgres
@@ -256,16 +256,16 @@ def debug_inspect_session_engine_url():
 def debug_comment_decorator():
     """
     Debug endpoint to test query commenting via decorator.
-    
+
     Test:
         curl -s http://localhost:8000/debug/comment/decorator
-    
+
     Check PostgreSQL logs for:
         /* endpoint=/debug/comment/decorator test=decorator */ SELECT ...
     """
     stmt = text("SELECT pg_backend_pid(), current_database()")
     result = db.session.execute(stmt).fetchone()
-    
+
     return {
         "pid": result[0],
         "database": result[1],
@@ -277,19 +277,54 @@ def debug_comment_decorator():
 def debug_comment_contextmanager():
     """
     Debug endpoint to test query commenting via context manager.
-    
+
     Test:
         curl -s http://localhost:8000/debug/comment/contextmanager
-    
+
     Check PostgreSQL logs for:
         /* endpoint=/debug/comment/contextmanager test=contextmanager */ SELECT ...
     """
     with query_comment("endpoint=/debug/comment/contextmanager test=contextmanager"):
         stmt = text("SELECT pg_backend_pid(), current_database()")
         result = db.session.execute(stmt).fetchone()
-    
+
     return {
         "pid": result[0],
         "database": result[1],
         "comment_method": "contextmanager",
+    }
+
+
+@app.route("/debug/release-connection")
+def debug_release_connection():
+    """
+    Debug endpoint to verify early connection release mid-request.
+
+    Demonstrates that calling session.close() returns the connection to the pool
+    immediately, without waiting for request teardown. The session is re-usable
+    afterwards — the next query transparently acquires a new connection.
+
+    This is useful when a request does a SELECT and then calls external services,
+    avoiding holding a connection idle during that time.
+
+    Pool log sequence expected:
+        Checkout  → first SELECT acquires connection
+        Checkin   → session.close() releases it back to pool
+        Checkout  → second SELECT (pg_sleep) acquires a new connection
+        Checkin   → request teardown releases it
+
+    Test:
+        curl -s http://localhost:8000/debug/release-connection
+    """
+
+    db.session.execute(text("SELECT current_database(), pg_backend_pid()")).fetchone()
+    db.session.close()  # Explicitly release connection back to pool
+
+    # After closing the session, the scoped_session should acquire a new connection from the pool for the next query.
+    db.session.execute(
+        text("SELECT pg_sleep(3), pg_backend_pid(), current_database()")
+    ).fetchone()
+
+    return {
+        "message": "Executed query after releasing connection. Check pool logs for connection lifecycle events."
     }

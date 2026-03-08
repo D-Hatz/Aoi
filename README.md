@@ -43,22 +43,22 @@ Flask + SQLAlchemy + gevent reference implementation.
 
 ```bash
 docker run -d \
-  --name kokoro-postgres \
+  --name postgres \
   -e POSTGRES_USER=postgres \
   -e POSTGRES_PASSWORD=postgres \
   -p 5432:5432 \
   postgres:16
 
 # Create second database
-docker exec kokoro-postgres psql -U postgres -c "CREATE DATABASE other_db;"
+docker exec postgres psql -U postgres -c "CREATE DATABASE other_db;"
 ```
 
 ### PostgreSQL Logging
 
 ```bash
-docker exec kokoro-postgres psql -U postgres -c "ALTER SYSTEM SET log_statement = 'all';"
-docker exec kokoro-postgres psql -U postgres -c "SELECT pg_reload_conf();"
-docker logs -f kokoro-postgres
+docker exec postgres psql -U postgres -c "ALTER SYSTEM SET log_statement = 'all';"
+docker exec postgres psql -U postgres -c "SELECT pg_reload_conf();"
+docker logs -f postgres
 ```
 
 ## Run Application
