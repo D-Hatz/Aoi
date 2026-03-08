@@ -5,7 +5,9 @@ import typing as t
 
 import gevent
 from flask import Flask
-from sqlalchemy import text
+from sqlalchemy import select, text
+
+from kokoro.models import User
 
 from .database import db
 from .sqlalchemy_decorators import set_route_bind, with_query_comment
@@ -327,4 +329,47 @@ def debug_release_connection():
 
     return {
         "message": "Executed query after releasing connection. Check pool logs for connection lifecycle events."
+    }
+
+
+@app.route("/debug/orm-bind-leak")
+def debug_orm_bind_leak():
+    """
+    Demonstrates silent write leak when switching binds mid-session with a shared ORM object.
+
+    A User is loaded from primary. The bind is then switched to replica before committing
+    a change. Because the ORM object is tracked by the session (not the bind), SQLAlchemy
+    flushes the UPDATE to whatever bind is active at commit time — the replica.
+
+    This is a non-obvious side effect: if the replica allows writes (e.g. same PG user,
+    no read-only constraint), the write silently goes to the wrong database with no error.
+
+    The fix is to always commit before switching binds, or close the session and start
+    fresh on the target bind.
+
+    Seed data:
+        psql postgresql://postgres:postgres@localhost:5432/postgres -c "INSERT INTO users (name, email, created_at, updated_at) VALUES ('Test User', 'test@example.com', NOW(), NOW());"
+        psql postgresql://postgres:postgres@localhost:5432/other_db -c "INSERT INTO users (name, email, created_at, updated_at) VALUES ('Test User', 'test@example.com', NOW(), NOW());"
+
+    Test:
+        curl -s http://localhost:8000/debug/orm-bind-leak
+
+    Expected (check pg logs):
+        SELECT → [primary]
+        UPDATE → [replica]   ← write leaked to wrong database
+        COMMIT → [primary]
+    """
+
+    db.session.set_bind("primary")
+    stmt = select(User).where(User.name == "Test User")
+    # the object was fetched from the primary.
+    user = db.session.execute(stmt).scalar_one_or_none()
+
+    db.session.set_bind("replica")
+
+    user.email = "test@example.com"
+    db.session.commit()
+
+    return {
+        "message": "the object is shared in session, so there no conflict on commit."
     }

@@ -78,6 +78,7 @@ class RouteSession(Session):
             self.engine_bind = bind
 
 
+
 @sa.event.listens_for(sa.Engine, "before_cursor_execute", retval=True)
 def _apply_comment(connection, cursor, statement, parameters, context, executemany):
     """
