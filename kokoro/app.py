@@ -5,7 +5,9 @@ import typing as t
 
 import gevent
 from flask import Flask
+import sqlalchemy as sa
 from sqlalchemy import select, text
+from sqlalchemy.orm.attributes import flag_modified
 
 from kokoro.models import User
 
@@ -347,9 +349,19 @@ def debug_orm_bind_leak():
     The fix is to always commit before switching binds, or close the session and start
     fresh on the target bind.
 
+    Version mismatch behavior:
+        If version_id_col is in use and the replica row has a different version than what
+        was loaded from primary, SQLAlchemy raises StaleDataError (UPDATE matches 0 rows).
+        To observe the silent leak instead, sync the replica version to match primary first:
+
+        # get version from primary
+        psql postgresql://postgres:postgres@localhost:5432/postgres -c "SELECT name, version FROM users WHERE name='Test User';"
+        # apply same version to replica
+        psql postgresql://postgres:postgres@localhost:5432/other_db -c "UPDATE users SET version='<uuid>' WHERE name='Test User';"
+
     Seed data:
-        psql postgresql://postgres:postgres@localhost:5432/postgres -c "INSERT INTO users (name, email, created_at, updated_at) VALUES ('Test User', 'test@example.com', NOW(), NOW());"
-        psql postgresql://postgres:postgres@localhost:5432/other_db -c "INSERT INTO users (name, email, created_at, updated_at) VALUES ('Test User', 'test@example.com', NOW(), NOW());"
+        psql postgresql://postgres:postgres@localhost:5432/postgres -c "INSERT INTO users (name, email, created_at, updated_at, version) VALUES ('Test User', 'test@example.com', NOW(), NOW(), gen_random_uuid());"
+        psql postgresql://postgres:postgres@localhost:5432/other_db -c "INSERT INTO users (name, email, created_at, updated_at, version) VALUES ('Test User', 'test@example.com', NOW(), NOW(), gen_random_uuid());"
 
     Test:
         curl -s http://localhost:8000/debug/orm-bind-leak
@@ -367,9 +379,47 @@ def debug_orm_bind_leak():
 
     db.session.set_bind("replica")
 
-    user.email = "test@example.com"
+    flag_modified(user, "name")  # mark the object as dirty without changing the value
     db.session.commit()
 
     return {
-        "message": "the object is shared in session, so there no conflict on commit."
+        "message": "UPDATE was committed to replica — write leaked to wrong database. Check pg logs to confirm."
     }
+
+
+@app.route("/debug/optimistic-lock")
+def debug_optimistic_lock():
+    """
+    Demonstrates optimistic locking via version_id_col raising StaleDataError.
+
+    Both requests read the same User at version X. The first to commit advances
+    the version to Y. The second commit fails because the WHERE version=X clause
+    matches no rows.
+
+    Test (run concurrently):
+        curl -s http://localhost:8000/debug/optimistic-lock &
+        curl -s http://localhost:8000/debug/optimistic-lock &
+
+    Expected:
+        - First request:  200, version updated
+        - Second request: 409, StaleDataError — row was already modified
+    """
+    db.session.set_bind("primary")
+    user = db.session.execute(select(User).where(User.name == "Test User")).scalar_one()
+    version_before = str(user.version)
+
+    time.sleep(
+        5
+    )  # yield to other greenlets — allows concurrent request to commit first
+
+    flag_modified(user, "name")  # mark dirty without changing the value
+    try:
+        db.session.commit()
+    except sa.orm.exc.StaleDataError:
+        db.session.rollback()
+        return {
+            "error": "StaleDataError: row was modified by another request",
+            "version_before": version_before,
+        }, 409
+
+    return {"version_before": version_before, "version_after": str(user.version)}
